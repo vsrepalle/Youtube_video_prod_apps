@@ -1,96 +1,136 @@
-import os, json, shutil, time
+import os
+import json
+import logging
+import pickle
+import subprocess
 from datetime import datetime
-from gtts import gTTS
-from moviepy.editor import *
+from moviepy.editor import ColorClip, TextClip, CompositeVideoClip, AudioFileClip, CompositeAudioClip
 from moviepy.config import change_settings
-from PIL import Image
-from icrawler.builtin import BingImageCrawler
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 
-# 1. NEW: Import the upload module
-try:
-    from stage3_upload import upload_from_json
-except ImportError:
-    print("⚠️ stage3_upload.py not found. Uploading will be disabled.")
-
-from visual_effects import get_styled_header, get_styled_ticker, get_progress_bar
-
-# --- CONFIG ---
+# --- 🛠️ STEP 1: FIX IMAGEMAGICK PATH ---
 IMAGEMAGICK_PATH = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
 change_settings({"IMAGEMAGICK_BINARY": IMAGEMAGICK_PATH})
 
-W, H = 720, 1280 
-BGM_PATH = "bg_music.mp3"
+# --- CONFIGURATION ---
+SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+W, H = 1080, 1920  # standard 9:16 Shorts resolution
 
-def fetch_and_clean_images(query, index):
-    raw_dir, clean_dir = f"raw_{index}", f"clean_{index}"
-    for d in [raw_dir, clean_dir]:
-        if os.path.exists(d): shutil.rmtree(d)
-        os.makedirs(d)
-    main_term = query.split('|')[0].strip()
-    crawler = BingImageCrawler(storage={'root_dir': raw_dir}, log_level=50)
-    crawler.crawl(keyword=f"{main_term} 2026 trending", max_num=5)
-    valid_paths = []
-    for f in sorted(os.listdir(raw_dir)):
-        try:
-            with Image.open(os.path.join(raw_dir, f)) as img:
-                p = os.path.join(clean_dir, f"{f}.jpg")
-                img.convert('RGB').save(p, "JPEG")
-                valid_paths.append(p)
-        except: continue
-    return valid_paths
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.FileHandler("automation.log", encoding='utf-8'), logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
-def generate_video(json_file):
-    with open(json_file, "r", encoding="utf-8") as f: items = json.load(f)
+# --- 🎥 VIDEO GENERATION ---
+def render_short_video(item, output_filename):
+    """Creates a 9:16 Short with text and the mandatory 'Tune with us' end scene."""
+    logger.info(f"🎬 Rendering video for: {item['headline']}")
+    duration = 15  # Total video length
+    
+    # 1. Background
+    bg = ColorClip(size=(W, H), color=(0, 0, 30), duration=duration)
+    
+    # 2. Headline Text (Using MoviePy v2.0 compatible arguments)
+    txt = TextClip(
+        item['headline'],
+        fontsize=80,
+        color='white',
+        method='caption',
+        size=(W-200, None),
+        align='center'
+    ).set_position('center').set_duration(duration)
+    
+    # 3. Last Scene Hook (Mandatory: ONLY appears in last scene)
+    cta = TextClip(
+        "Tune with us for more such news",
+        fontsize=50,
+        color='yellow',
+        bg_color='black'
+    ).set_position(('center', H-400)).set_start(duration-4).set_duration(4)
 
-    all_scenes = []
-    for i, item in enumerate(items):
-        print(f"Rendering Scene {i+1}...")
-        voice_p = f"v_{i}.mp3"
-        gTTS(text=f"{item['hook_text']}. {item['headline']}. {item['details']}", lang='en').save(voice_p)
-        audio = AudioFileClip(voice_p)
-        dur = audio.duration
+    final_video = CompositeVideoClip([bg, txt, cta])
+    
+    # Check for background music
+    if os.path.exists("bg_music.mp3"):
+        bgm = AudioFileClip("bg_music.mp3").volumex(0.1).set_duration(duration)
+        final_video = final_video.set_audio(bgm)
 
-        header = get_styled_header(item['hook_text'], dur, W).set_position(('center', 60))
-        footer = get_styled_ticker(item['details'], dur, W, 300).set_position(('center', 920))
-        prog_bar = get_progress_bar(dur, W, H)
+    final_video.write_videofile(output_filename, fps=24, codec="libx264")
+    logger.info(f"✅ Video rendered: {output_filename}")
 
-        img_paths = fetch_and_clean_images(item.get('search_key', ''), i)
-        if img_paths:
-            slides = [ImageClip(p).set_duration(dur/len(img_paths)).resize(height=580) for p in img_paths]
-            slideshow = concatenate_videoclips(slides, method="compose").set_position(('center', 280))
+# --- 🔑 YOUTUBE AUTH ---
+def get_youtube_service(channel_name):
+    client_secrets_file = 'client_secret.json'
+    pickle_file = f"token_{channel_name.replace(' ', '_')}.pickle"
+    creds = None
+    if os.path.exists(pickle_file):
+        with open(pickle_file, 'rb') as token:
+            creds = pickle.load(token)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
         else:
-            slideshow = ColorClip(size=(W-100, 580), color=(40, 40, 60)).set_duration(dur).set_position(('center', 280))
+            flow = InstalledAppFlow.from_client_secrets_file(client_secrets_file, SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(pickle_file, 'wb') as token:
+            pickle.dump(creds, token)
+    return build('youtube', 'v3', credentials=creds)
 
-        bg = ColorClip(size=(W, H), color=(0, 0, 15)).set_duration(dur)
-        scene = CompositeVideoClip([bg, header, slideshow, footer, prog_bar]).set_audio(audio)
-        all_scenes.append(scene)
+# --- 📤 YOUTUBE UPLOAD ---
+def upload_to_youtube(service, file_path, meta):
+    try:
+        body = {
+            'snippet': {
+                'title': meta['title'],
+                'description': meta.get('description', 'Tune with us for more such news.'),
+                'tags': meta.get('tags', []),
+                'categoryId': meta.get('category_id', '22')
+            },
+            'status': {
+                'privacyStatus': 'private', # Defaulting to private
+                'selfDeclaredMadeForKids': False
+            }
+        }
+        media = MediaFileUpload(file_path, chunksize=-1, resumable=True)
+        request = service.videos().insert(part="snippet,status", body=body, media_body=media)
+        response = request.execute()
+        logger.info(f"✅ Success! YouTube ID: {response.get('id')}")
+    except Exception as e:
+        logger.error(f"❌ Upload failed: {str(e)}")
 
-    final_v = concatenate_videoclips(all_scenes, method="compose")
-    cta = TextClip("Tune with us for more such news", fontsize=38, color='white', bg_color='darkred', size=(W, 100), method='caption'
-                   ).set_start(final_v.duration-3.5).set_duration(3.5).set_position(('center', H-250))
-    final_output = CompositeVideoClip([final_v, cta])
-    
-    if os.path.exists(BGM_PATH):
-        bgm = AudioFileClip(BGM_PATH).volumex(0.1).set_duration(final_output.duration)
-        final_output = final_output.set_audio(CompositeAudioClip([final_output.audio, bgm]))
+# --- 🚀 AUTOMATION LOOP ---
+def run_automation(json_file):
+    if not os.path.exists(json_file):
+        logger.error(f"JSON {json_file} missing.")
+        return
 
-    out_name = os.path.abspath(f"Viral_Short_{datetime.now().strftime('%M%S')}.mp4")
-    final_output.write_videofile(out_name, fps=24, codec="libx264")
+    with open(json_file, 'r', encoding='utf-8') as f:
+        items = json.load(f)
 
-    # 2. NEW: ASK USER TO CONTINUE WITH UPLOAD
-    print("\n" + "="*30)
-    print(f"✅ Video Generated: {out_name}")
-    user_choice = input("🚀 Do you want to upload this to YouTube now? (y/n): ").lower()
-    
-    if user_choice == 'y':
-        print("📤 Starting Upload Pipeline...")
+    for i, item in enumerate(items):
+        channel = item['target_channel']
+        meta = item['metadata']
+        video_filename = f"Short_{channel.replace(' ', '_')}_{i}.mp4"
+
+        # 1. Generate Video
         try:
-            # Pass the JSON data and the absolute path of the new video
-            upload_from_json(json_file, video_file=out_name)
+            render_short_video(item, video_filename)
         except Exception as e:
-            print(f"❌ Upload failed: {e}")
-    else:
-        print("⏭️ Upload skipped. Video saved locally.")
+            logger.error(f"💥 Rendering failed: {e}")
+            continue
+
+        # 2. Upload Video
+        if os.path.exists(video_filename):
+            print(f"\n🎬 Done! Ready to upload to: {channel}")
+            ans = input(f"Confirm upload for '{meta['title']}'? (y/n): ").lower()
+            if ans == 'y':
+                service = get_youtube_service(channel)
+                upload_to_youtube(service, video_filename, meta)
 
 if __name__ == "__main__":
-    generate_video("news_data.json")
+    run_automation("news_data.json")
