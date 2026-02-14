@@ -6,16 +6,12 @@ from googleapiclient.http import MediaFileUpload
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
 def get_authenticated_service():
+    # Looks for your secret file in the same directory
     flow = InstalledAppFlow.from_client_secrets_file("client_secrets.json", SCOPES)
     credentials = flow.run_local_server(port=0)
     return build("youtube", "v3", credentials=credentials)
 
 def upload_from_json(json_file, video_file=None):
-    """
-    Uploads a video to YouTube using data from a JSON file.
-    :param json_file: Path to the news_data.json
-    :param video_file: Optional path to the video. If provided, it overrides the JSON filename.
-    """
     if not os.path.exists(json_file):
         print(f"❌ JSON file not found: {json_file}")
         return
@@ -23,11 +19,11 @@ def upload_from_json(json_file, video_file=None):
     with open(json_file, "r", encoding="utf-8") as f:
         data_raw = json.load(f)
 
-    # Handle list-based JSON
+    # Always grab the metadata from the first item in the list
     data = data_raw[0] if isinstance(data_raw, list) else data_raw
+    meta = data.get("metadata", {})
 
-    # Metadata & Path Logic: 
-    # Priority: 1. video_file argument, 2. JSON video_name, 3. Default fallback
+    # File Path Logic
     video_filename = video_file or data.get("video_name") or "TrendWave_Latest.mp4"
     video_path = os.path.abspath(video_filename)
 
@@ -37,26 +33,33 @@ def upload_from_json(json_file, video_file=None):
 
     youtube = get_authenticated_service()
 
-    # Use Search Key for Title as per preference (e.g., Alissa Turney | Sarah Turney)
-    video_title = data.get("search_key", "TrendWave News Update").split('|')[0].strip()
-    if len(video_title) < 5: # Fallback to headline if search_key is missing
-        video_title = data.get("headline", "Latest News Update")
+    # --- 2026 METADATA HANDLING ---
+    # Title: Uses your Search Key preference (e.g., "OpenAI Ghost | Sam Altman")
+    video_title = meta.get("title") or data.get("search_key", "TrendWave Update").split('|')[0].strip()
+    
+    # Category logic based on your channel requests
+    # 27 = Education, 28 = Science & Tech (Shopping/Gadgets)
+    cat_id = meta.get("category_id", "28") 
 
     request_body = {
         "snippet": {
             "title": video_title,
-            "description": f"{data.get('details', '')}\n\nTune with us for more such news.",
-            "tags": ["news", "latest", "trends", "education"],
-            "categoryId": "27" # Education
+            "description": meta.get("description", f"{data.get('details', '')}\n\nTune with us for more such news."),
+            "tags": meta.get("tags", ["news", "AI", "2026", "trends"]),
+            "categoryId": cat_id
         },
         "status": {
-            "privacyStatus": "private", # ALWAYS PRIVATE BY DEFAULT
-            "selfDeclaredMadeForKids": False
+            "privacyStatus": meta.get("privacy_status", "private"),
+            "selfDeclaredMadeForKids": False,
+            # MANDATORY 2026 Compliance: Altered/Synthetic Media Flag
+            "containsSyntheticMedia": meta.get("self_declared_synthetic", True)
         }
     }
 
     media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
-    print(f"🚀 Initializing Upload: {video_filename}...")
+    print(f"🚀 Initializing Upload: {video_filename}")
+    print(f"🏷️ Category: {'Education' if cat_id == '27' else 'Tech/Gadgets'}")
+    print(f"🤖 AI Disclosure: {'ON' if request_body['status']['containsSyntheticMedia'] else 'OFF'}")
     
     request = youtube.videos().insert(part="snippet,status", body=request_body, media_body=media)
 

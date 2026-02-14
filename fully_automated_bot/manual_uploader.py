@@ -3,32 +3,22 @@ import tkinter as tk
 from tkinter import filedialog
 from stage3_upload import upload_from_json
 
-def pick_and_upload():
-    # 1. Setup File Picker
+def manual_uploader_tool():
     root = tk.Tk()
-    root.withdraw() # Hide main tkinter window
+    root.withdraw()
     
-    print("📂 Please select the MP4 video file...")
-    video_path = filedialog.askopenfilename(title="Select Video", filetypes=[("Video files", "*.mp4")])
-    
-    if not video_path:
-        print("🔴 Upload cancelled. No file selected.")
-        return
+    print("📂 Select the MP4 file...")
+    v_path = filedialog.askopenfilename(title="Select Video", filetypes=[("MP4", "*.mp4")])
+    if not v_path: return
 
-    print("📂 Please select the JSON metadata file...")
-    json_path = filedialog.askopenfilename(title="Select JSON", filetypes=[("JSON files", "*.json")])
-    
-    if not json_path:
-        print("🔴 Upload cancelled. No JSON selected.")
-        return
+    print("📂 Select the News JSON...")
+    j_path = filedialog.askopenfilename(title="Select JSON", filetypes=[("JSON", "*.json")])
+    if not j_path: return
 
-    # 2. Trigger Upload
-    print(f"🚀 Uploading {os.path.basename(video_path)} as Private...")
-    try:
-        upload_from_json(json_path, video_file=video_path)
-        print("✅ Upload successful!")
-    except Exception as e:
-        print(f"🔴 Upload failed: {e}")
+    print("\n--- 2026 AI Compliance Check ---")
+    print("Self-Declaring as Synthetic Media: YES")
+    
+    upload_from_json(j_path, os.path.abspath(v_path))
 
 if __name__ == "__main__":
-    pick_and_upload()
+    manual_uploader_tool()
