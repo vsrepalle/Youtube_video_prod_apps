@@ -3,15 +3,15 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+# --- CONFIGURATION ---
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
 def get_authenticated_service():
-    # Looks for your secret file in the same directory
     flow = InstalledAppFlow.from_client_secrets_file("client_secrets.json", SCOPES)
     credentials = flow.run_local_server(port=0)
     return build("youtube", "v3", credentials=credentials)
 
-def upload_from_json(json_file, video_file=None):
+def upload_from_json(json_file, video_file=None, index=0):
     if not os.path.exists(json_file):
         print(f"❌ JSON file not found: {json_file}")
         return
@@ -19,47 +19,63 @@ def upload_from_json(json_file, video_file=None):
     with open(json_file, "r", encoding="utf-8") as f:
         data_raw = json.load(f)
 
-    # Always grab the metadata from the first item in the list
-    data = data_raw[0] if isinstance(data_raw, list) else data_raw
+    # --- 1. SYNC INDEX TO DATA ---
+    # This ensures we pull title/desc/tags for ONLY the scene we are uploading
+    if isinstance(data_raw, list):
+        if index >= len(data_raw):
+            print(f"⚠️ Index {index} out of range, using first item.")
+            data = data_raw[0]
+        else:
+            data = data_raw[index]
+    else:
+        data = data_raw
+
+    # Extract the metadata block for this specific index
     meta = data.get("metadata", {})
 
-    # File Path Logic
-    video_filename = video_file or data.get("video_name") or "TrendWave_Latest.mp4"
+    # --- 2. DYNAMIC TITLE RESOLUTION ---
+    # Ensures Title 1, Title 2, and Title 3 are unique
+    base_title = meta.get("title") or data.get("search_key", "TrendWave Update").split('|')[0].strip()
+    video_title = f"{base_title} - Part {index + 1}"
+
+    # --- 3. DYNAMIC DESCRIPTION RESOLUTION ---
+    # Combines specific scene details with your required 'Tune with us' call to action
+    raw_desc = meta.get("description") or data.get("details", "Latest news update.")
+    final_description = f"{raw_desc}\n\nTune with us for more such news."
+
+    # --- 4. HASHTAG RESOLUTION ---
+    # Pulls unique tags for this scene or uses defaults
+    video_tags = meta.get("hashtags", ["news", "AI", "2026", "trends"])
+
+    # --- FILE PATH CHECK ---
+    video_filename = video_file or data.get("video_name") or f"scene_{index}.mp4"
     video_path = os.path.abspath(video_filename)
 
     if not os.path.exists(video_path):
-        print(f"❌ Video file NOT FOUND at: {video_path}")
+        print(f"❌ Video file NOT FOUND: {video_path}")
         return
 
     youtube = get_authenticated_service()
 
-    # --- 2026 METADATA HANDLING ---
-    # Title: Uses your Search Key preference (e.g., "OpenAI Ghost | Sam Altman")
-    video_title = meta.get("title") or data.get("search_key", "TrendWave Update").split('|')[0].strip()
-    
-    # Category logic based on your channel requests
-    # 27 = Education, 28 = Science & Tech (Shopping/Gadgets)
-    cat_id = meta.get("category_id", "28") 
-
+    # --- API REQUEST BODY ---
     request_body = {
         "snippet": {
             "title": video_title,
-            "description": meta.get("description", f"{data.get('details', '')}\n\nTune with us for more such news."),
-            "tags": meta.get("tags", ["news", "AI", "2026", "trends"]),
-            "categoryId": cat_id
+            "description": final_description,
+            "tags": video_tags,
+            "categoryId": meta.get("category_id", "28") 
         },
         "status": {
             "privacyStatus": meta.get("privacy_status", "private"),
             "selfDeclaredMadeForKids": False,
-            # MANDATORY 2026 Compliance: Altered/Synthetic Media Flag
             "containsSyntheticMedia": meta.get("self_declared_synthetic", True)
         }
     }
 
     media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
-    print(f"🚀 Initializing Upload: {video_filename}")
-    print(f"🏷️ Category: {'Education' if cat_id == '27' else 'Tech/Gadgets'}")
-    print(f"🤖 AI Disclosure: {'ON' if request_body['status']['containsSyntheticMedia'] else 'OFF'}")
+    print(f"🚀 Uploading Scene {index+1}: {video_filename}")
+    print(f"📝 Title: {video_title}")
+    print(f"🏷️ Tags: {', '.join(video_tags)}")
     
     request = youtube.videos().insert(part="snippet,status", body=request_body, media_body=media)
 
@@ -67,13 +83,18 @@ def upload_from_json(json_file, video_file=None):
     while response is None:
         status, response = request.next_chunk()
         if status: 
-            print(f"📈 Uploading... {int(status.progress() * 100)}%")
+            print(f"📈 Progress: {int(status.progress() * 100)}%")
 
-    print(f"✅ Upload Complete! Video ID: {response['id']}")
+    print(f"✅ Success! Video ID: {response['id']}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", default="news_data.json")
     parser.add_argument("--file", default=None)
+    parser.add_argument("--index", type=int, default=0) 
     args = parser.parse_args()
-    upload_from_json(args.json, video_file=args.file)
+    
+    # Final Reminder: Cricket news (Ishan Kishan/Bumrah) is trending! 
+    # Ensure your next JSON includes these high-performing stats.
+    
+    upload_from_json(args.json, video_file=args.file, index=args.index)
