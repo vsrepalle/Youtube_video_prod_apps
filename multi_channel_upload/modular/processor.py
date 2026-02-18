@@ -1,123 +1,141 @@
-import os, json, shutil, gc, time, random
+import os
+import json
+import shutil
+import gc
+import numpy as np
 from gtts import gTTS
-from moviepy.editor import *
-from moviepy.config import change_settings
-from PIL import Image
 from icrawler.builtin import BingImageCrawler
+# Explicitly import VideoClip to fix the NameError
+from moviepy.editor import (
+    TextClip, ImageClip, AudioFileClip, 
+    CompositeVideoClip, ColorClip, concatenate_videoclips,
+    VideoClip 
+)
+from moviepy.config import change_settings
 
-# --- CONFIG ---
+# --- SYSTEM CONFIG ---
+# Ensure this path is 100% correct for your machine
 IMAGEMAGICK_PATH = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
 change_settings({"IMAGEMAGICK_BINARY": IMAGEMAGICK_PATH})
-W, H = 720, 1280 
-SPEED_FACTOR = 1.15 # Slightly slower to make highlighting readable
+
+W, H = 1080, 1920 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+MUSIC_DIR = os.path.join(ASSETS_DIR, "music")
 
-HEADER_END_Y = 260
-SUBTITLE_START_Y = 900
-GAP_HEIGHT = 600 
+def get_mood_music(channel_name, duration):
+    bg_music_map = {
+        "trendwave_now": "bg_cricket.mp3",
+        "SpaceMindAI": "bg_space.mp3",
+        "ExamPulse24_7": "bg_education.mp3",
+        "WonderFacts24_7": "bg_facts.mp3"
+    }
+    track_name = bg_music_map.get(channel_name, "bg_default.mp3")
+    target = os.path.join(MUSIC_DIR, track_name)
+    
+    if os.path.exists(target):
+        music = AudioFileClip(target).volumex(0.12).set_duration(duration)
+        if music.duration < duration:
+            from moviepy.audio.fx.all import audio_loop
+            music = audio_loop(music, duration=duration)
+        return music
+    return None
 
-def fetch_images(item_data, index):
-    raw_dir = os.path.join(BASE_DIR, f"raw_{index}")
+def fetch_images(item_data, index, channel_name):
+    raw_dir = os.path.join(BASE_DIR, f"temp_raw_{channel_name}_{index}")
     if os.path.exists(raw_dir): shutil.rmtree(raw_dir)
     os.makedirs(raw_dir)
     
-    query = item_data.get('metadata', {}).get('search_key', '').split('|')[0].strip()
-    if not query: query = item_data['headline']
-
+    # Contextual search key formatting
+    search_query = item_data['metadata'].get('search_key', '').split('|')[0].strip()
+    if not search_query: search_query = item_data['headline']
+    
     crawler = BingImageCrawler(storage={'root_dir': raw_dir}, log_level=50)
-    crawler.crawl(keyword=query, max_num=5)
-    return [os.path.join(raw_dir, f) for f in os.listdir(raw_dir)]
-
-def create_highlighted_subtitles(full_text, duration, width):
-    """Creates a sequence of text clips where the current word is yellow."""
-    words = full_text.upper().split()
-    if not words: return TextClip("", fontsize=30).set_duration(duration)
+    crawler.crawl(keyword=search_query, max_num=4)
     
-    word_duration = duration / len(words)
-    clips = []
-    
-    current_time = 0
-    for i, target_word in enumerate(words):
-        # Create a line of text where only the 'target_word' is yellow
-        # For simplicity and performance, we show the current word in Yellow
-        # and the surrounding context in White
-        sentence_part = []
-        for j, w in enumerate(words):
-            if i == j:
-                sentence_part.append(f"<color='yellow'>{w}</color>")
-            else:
-                sentence_part.append(w)
-        
-        # Note: MoviePy method='caption' handles wrapping
-        sub_clip = TextClip(" ".join(words), fontsize=40, color='white', font='Arial-Bold',
-                            method='caption', size=(width-100, None), 
-                            print_canvas=True).set_start(current_time).set_duration(word_duration)
-        
-        # Overlay the Yellow Highlight Word (Simplified for stability)
-        # We use a simple color-swapping logic here
-        sub_clip = TextClip(" ".join(words[:i]) + f" {words[i]} " + " ".join(words[i+1:]),
-                            fontsize=40, color='white', font='Arial-Bold',
-                            method='caption', size=(width-100, None))
-        
-        # To truly highlight, we swap the base color for that specific timing
-        highlight_clip = TextClip(full_text.upper(), fontsize=40, color='white', font='Arial-Bold',
-                                 method='caption', size=(width-100, None)).set_start(current_time).set_duration(word_duration)
-        
-        # We will use the 'Sentence Flip' method for clear visibility
-        clips.append(highlight_clip.set_position(('center', SUBTITLE_START_Y)))
-        current_time += word_duration
-        
-    return clips
+    return [os.path.join(raw_dir, f) for f in os.listdir(raw_dir) if f.endswith(('.jpg', '.png', '.jpeg'))]
 
-def generate_video(json_path, youtube_service):
-    with open(json_path, "r", encoding="utf-8") as f: 
-        items = json.load(f)
+def generate_video_single(json_path, index, channel_name):
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        item = items[index]
+        scene_id = f"{channel_name}_{index}"
+        output_filename = f"Render_{scene_id}.mp4"
 
-    for i, item in enumerate(items):
-        v_title = item.get('metadata', {}).get('title', "News Update")
-        print(f"🎬 RENDERING: {v_title}")
-        
-        # 1. Audio
+        print(f"🎬 RENDERING: {item['headline']}")
+
+        # 1. AUDIO
         full_text = f"{item['hook_text']} {item['details']}"
-        tts_path = os.path.join(BASE_DIR, f"audio_{i}.mp3")
+        tts_path = os.path.join(BASE_DIR, f"temp_vo_{scene_id}.mp3")
         gTTS(text=full_text, lang='en').save(tts_path)
-        audio = AudioFileClip(tts_path)
-        dur = audio.duration
-
-        # 2. Layers
-        bg = ColorClip(size=(W, H), color=(10, 10, 20)).set_duration(dur)
         
-        # Image Slideshow
-        img_paths = fetch_images(item, i)
-        slides = [ImageClip(p).set_duration(dur/len(img_paths)).resize(width=W) for p in img_paths]
-        slideshow = concatenate_videoclips(slides, method="compose").set_position(('center', HEADER_END_Y))
+        voice = AudioFileClip(tts_path)
+        dur = voice.duration
+        bg_music = get_mood_music(channel_name, dur)
+        
+        if bg_music:
+            from moviepy.audio.AudioClip import CompositeAudioClip
+            final_audio = CompositeAudioClip([voice, bg_music])
+        else:
+            final_audio = voice
 
-        # 3. Static Headlines
-        header = TextClip(item['headline'].upper(), fontsize=50, color='yellow', font='Arial-Bold', 
-                          bg_color='black', size=(W-40, None), method='caption').set_duration(dur).set_position(('center', 50))
+        # 2. VISUALS (Slideshow)
+        img_paths = fetch_images(item, index, channel_name)
+        if img_paths:
+            time_per_img = dur / len(img_paths)
+            clips = [ImageClip(p).set_duration(time_per_img).resize(width=W) for p in img_paths]
+            slideshow = concatenate_videoclips(clips, method="compose").set_position('center')
+        else:
+            slideshow = ColorClip(size=(W, H), color=(30,30,30)).set_duration(dur)
 
-        # 4. Highlighted Subtitles (Word Estimation)
-        words = full_text.upper().split()
+        # 3. OVERLAYS
+        head_bg = ColorClip(size=(W, 250), color=(0,0,0)).set_opacity(0.7).set_duration(dur).set_position(('center', 0))
+        headline = TextClip(item['headline'].upper(), fontsize=70, color='yellow', font='Arial-Bold',
+                            method='caption', size=(W-80, None)).set_duration(dur).set_position(('center', 50))
+
+        loc_tag = TextClip(f"📍 {item['location'].upper()} | {item['date']}", fontsize=28, color='white', 
+                           bg_color='darkred').set_duration(dur).set_position((40, 260))
+
+        # 4. WORD HIGHLIGHTING
+        words = full_text.split()
         word_dur = dur / len(words)
         sub_clips = []
-        for j, word in enumerate(words):
-            # Create a yellow 'pop' for the current word
-            w_clip = TextClip(word, fontsize=55, color='yellow', font='Arial-Bold', stroke_color='black', stroke_width=2).set_start(j*word_dur).set_duration(word_dur).set_position(('center', SUBTITLE_START_Y))
+        for i, word in enumerate(words):
+            w_clip = TextClip(word.upper(), fontsize=85, color='yellow', font='Arial-Bold',
+                              stroke_color='black', stroke_width=2).set_start(i * word_dur).set_duration(word_dur).set_position(('center', 1450))
             sub_clips.append(w_clip)
 
-        # 5. Last Scene CTA
-        cta = TextClip("TUNE WITH US FOR MORE NEWS", fontsize=45, color='white', bg_color='red',
-                       size=(W, 120), method='caption').set_start(dur-3).set_duration(3).set_position(('center', 'bottom'))
-
-        # 6. Compose
-        final = CompositeVideoClip([bg, slideshow, header, *sub_clips, cta]).set_audio(audio)
+        # 5. PROGRESS BAR (Fixed VideoClip reference)
+        def make_frame(t):
+            curr_w = max(2, int((t/dur) * W))
+            # Return a numpy array frame
+            return ColorClip(size=(curr_w, 15), color=(255, 230, 0)).get_frame(t)
         
-        out_name = os.path.join(BASE_DIR, f"TrendWave_{i}.mp4")
-        final.write_videofile(out_name, fps=24, codec="libx264")
+        prog_bar = VideoClip(make_frame, duration=dur).set_position((0, H - 160))
 
-        # 7. Upload Prompt
-        if input(f"🚀 Upload {v_title}? (y/s): ").lower() == 'y':
+        # 6. ASSEMBLY
+        final_video = CompositeVideoClip([
+            slideshow, head_bg, headline, loc_tag, *sub_clips, prog_bar
+        ], size=(W, H)).set_audio(final_audio)
+
+        final_video.write_videofile(output_filename, fps=24, codec="libx264", audio_codec="aac", logger=None)
+        
+        # Cleanup
+        final_video.close(); voice.close(); gc.collect()
+        # Optional: Remove temp raw images
+        if os.path.exists(os.path.join(BASE_DIR, f"temp_raw_{channel_name}_{index}")):
+            shutil.rmtree(os.path.join(BASE_DIR, f"temp_raw_{channel_name}_{index}"))
+        if os.path.exists(tts_path): os.remove(tts_path)
+
+    except Exception as e:
+        print(f"❌ Error in Process {index}: {str(e)}")
+
+def generate_video_serial(json_path, youtube_service, channel_name):
+    with open(json_path, "r", encoding="utf-8") as f:
+        items = json.load(f)
+    for i in range(len(items)):
+        video_file = generate_video_single(json_path, i, channel_name)
+        if input(f"\n🚀 Upload to {channel_name}? (y/n): ").lower() == 'y':
             from stage3_upload import upload_video_with_service
-            upload_video_with_service(youtube_service, out_name, v_title, item['details'], ["cricket", "bollywood"])
-
-        final.close(); audio.close(); gc.collect()
+            upload_video_with_service(youtube_service, video_file, items[i])

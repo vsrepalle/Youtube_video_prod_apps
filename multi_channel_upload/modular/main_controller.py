@@ -1,31 +1,47 @@
-import os
+import json
+import multiprocessing
 import tkinter as tk
 from tkinter import filedialog
-# Importing from our modular files
-from processor import generate_video
-from stage3_upload import get_authenticated_service
+import os
+from processor import generate_video_single
 
 def run():
-    print("🔐 Authenticating YouTube Account...")
-    # This triggers the one-time browser login or loads token.pickle
-    youtube_service = get_authenticated_service()
+    print("\n" + "="*40 + "\n🚀 MULTI-CHANNEL CONTROLLER\n" + "="*40)
 
-    # File Selection UI
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    print("📁 Please select your News JSON file...")
-    selected_json = filedialog.askopenfilename(
-        title="Select News Metadata JSON", 
-        filetypes=[("JSON Files", "*.json")]
-    )
+    # Select JSON
+    root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+    selected_json = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
     root.destroy()
 
-    if selected_json:
-        # Pass both the JSON and the active YouTube service to the processor
-        generate_video(selected_json, youtube_service)
+    if not selected_json: return
+
+    with open(selected_json, "r", encoding="utf-8") as f:
+        items = json.load(f)
+
+    print(f"✅ Ready to process {len(items)} scenes.")
+    mode = input("🚀 Parallel Render? (y/n): ").lower()
+    
+    if mode == 'y':
+        processes = []
+        for i in range(len(items)):
+            # --- FIX: GET CHANNEL PER SCENE ---
+            # If "channel" field exists in JSON, use it. Otherwise, use "type".
+            scene_channel = items[i].get('channel', items[i].get('type', 'default'))
+            
+            p = multiprocessing.Process(
+                target=generate_video_single, 
+                args=(selected_json, i, scene_channel)
+            )
+            p.start()
+            processes.append(p)
+        for p in processes: p.join()
     else:
-        print("🛑 Operation cancelled: No JSON file selected.")
+        for i in range(len(items)):
+            scene_channel = items[i].get('channel', items[i].get('type', 'default'))
+            generate_video_single(selected_json, i, scene_channel)
+
+    print("\n🏆 Rendering Cycle Complete. Files are now ready for batch_manager.py")
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     run()
