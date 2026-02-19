@@ -1,0 +1,19 @@
+# Media files
+*.mp4
+*.mp3
+*.wav
+
+# JSON runtime / data files
+*.json
+
+# Client server data
+client_server*.json
+
+# Generated folders
+videos/
+output/
+temp/
+__pycache__/
+# Environment variables
+.env
+*.env
